@@ -1,13 +1,15 @@
 import os
 import time
 
-import requests  # type: ignore
-import streamlit as st  # type: ignore
+import requests # type: ignore
+import streamlit as st # type: ignore
 
 API_URL = "https://api.assemblyai.com"
+GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
 
 SYSTEM_PROMPT = (
-    "Create a draft SOAP note from the encounter transcript. "
+    "You are a medical scribe. Create a draft SOAP note from the encounter "
+    "transcript below. "
     "Speakers are labeled A and B and their roles are unknown: do not "
     "assume which one is the clinician; infer roles only if the transcript "
     "states them, and flag it if unclear. "
@@ -61,22 +63,24 @@ def transcribe(audio_bytes, key, terms):
     raise RuntimeError("Timed out waiting for the transcript.")
 
 
+def build_prompt(dialogue):
+    return SYSTEM_PROMPT + "\n\nTranscript:\n" + dialogue
+
+
 def draft_note(dialogue, key):
-    """Transcript text -> draft SOAP note."""
+    """Transcript text -> draft SOAP note (AssemblyAI LLM Gateway)."""
     response = requests.post(
-        "https://llm-gateway.assemblyai.com/v1/chat/completions",
-        headers={"Authorization": key, "Content-Type": "application/json"},
+        GATEWAY_URL,
+        headers={"authorization": key, "Content-Type": "application/json"},
         json={
             "model": "claude-sonnet-4-6",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": dialogue},
-            ],
-            "temperature": 0,
+            "messages": [{"role": "user", "content": build_prompt(dialogue)}],
+            "max_tokens": 2000,
         },
         timeout=120,
     )
-    response.raise_for_status()
+    if not response.ok:
+        raise RuntimeError(f"{response.status_code}: {response.text[:300]}")
     return response.json()["choices"][0]["message"]["content"]
 
 
@@ -116,15 +120,15 @@ if st.button("Create note", type="primary", disabled=not (uploaded and api_key))
 
     if st.session_state.get("transcript"):
         try:
-            with st.spinner("Drafting the SOAP note..."):
+            with st.spinner("Writing the SOAP note..."):
                 st.session_state["note"] = draft_note(
                     st.session_state["transcript"], api_key
                 )
         except Exception as error:
             st.error(
                 f"Note generation failed: {error}. "
-                "Your transcript is below; you can paste it into a Claude chat "
-                "and ask for a SOAP note instead."
+                "Your transcript is below. Open the backup prompt next to it "
+                "to get a note from any chatbot instead."
             )
     elif "transcript" in st.session_state:
         st.error("The transcript came back empty. Check that the audio has speech.")
@@ -152,3 +156,5 @@ if st.session_state.get("transcript"):
             )
         else:
             st.info("No note yet.")
+            with st.expander("Backup: copy this prompt into Claude or another chatbot"):
+                st.code(build_prompt(st.session_state["transcript"]), language=None)
