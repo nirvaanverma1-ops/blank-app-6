@@ -1,11 +1,15 @@
 import os
 import time
 
-import requests # type: ignore
-import streamlit as st # type: ignore
+import requests  # type: ignore
+import streamlit as st  # type: ignore
 
 API_URL = "https://api.assemblyai.com"
 GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
+
+# If the note step ever says the model wasn't found, change this one line
+# to another current Flash model name shown in Google AI Studio.
+GEMINI_MODEL = "gemini-3.7-flash"
 
 SYSTEM_PROMPT = (
     "You are a medical scribe. Create a draft SOAP note from the encounter "
@@ -67,8 +71,35 @@ def build_prompt(dialogue):
     return SYSTEM_PROMPT + "\n\nTranscript:\n" + dialogue
 
 
-def draft_note(dialogue, key):
-    """Transcript text -> draft SOAP note (AssemblyAI LLM Gateway)."""
+def draft_note_gemini(dialogue, key):
+    """Transcript text -> draft SOAP note, using Google's Gemini API (free tier)."""
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent"
+    )
+    response = requests.post(
+        url,
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+        json={
+            "contents": [
+                {"role": "user", "parts": [{"text": build_prompt(dialogue)}]}
+            ]
+        },
+        timeout=120,
+    )
+    if not response.ok:
+        raise RuntimeError(f"{response.status_code}: {response.text[:300]}")
+    data = response.json()
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts)
+    except (KeyError, IndexError):
+        raise RuntimeError(f"Unexpected reply from Gemini: {str(data)[:300]}")
+
+
+def draft_note_assemblyai(dialogue, key):
+    """Transcript text -> draft SOAP note, using AssemblyAI's LLM Gateway.
+    Needs an AssemblyAI account that has the LLM Gateway enabled (paid)."""
     response = requests.post(
         GATEWAY_URL,
         headers={"authorization": key, "Content-Type": "application/json"},
@@ -91,11 +122,22 @@ st.warning(
     "The note is an AI-generated draft and must be reviewed by a human."
 )
 
-api_key = os.environ.get("ASSEMBLYAI_API_KEY") or st.text_input(
-    "AssemblyAI API key",
-    type="password",
-    help="Not saved anywhere. It only lasts while this page is open.",
-)
+key_left, key_right = st.columns(2)
+with key_left:
+    api_key = os.environ.get("ASSEMBLYAI_API_KEY") or st.text_input(
+        "AssemblyAI API key (for the transcript)",
+        type="password",
+        help="Not saved anywhere. It only lasts while this page is open.",
+    )
+with key_right:
+    gemini_key = os.environ.get("GEMINI_API_KEY") or st.text_input(
+        "Gemini API key (for the note, free from Google AI Studio)",
+        type="password",
+        help=(
+            "Not saved anywhere. Leave empty to use AssemblyAI's LLM Gateway "
+            "instead (needs a paid AssemblyAI account)."
+        ),
+    )
 
 uploaded = st.file_uploader(
     "Upload a practice recording", type=["mp3", "wav", "m4a"]
@@ -121,9 +163,13 @@ if st.button("Create note", type="primary", disabled=not (uploaded and api_key))
     if st.session_state.get("transcript"):
         try:
             with st.spinner("Writing the SOAP note..."):
-                st.session_state["note"] = draft_note(
-                    st.session_state["transcript"], api_key
-                )
+                if gemini_key:
+                    note = draft_note_gemini(st.session_state["transcript"], gemini_key)
+                else:
+                    note = draft_note_assemblyai(
+                        st.session_state["transcript"], api_key
+                    )
+                st.session_state["note"] = note
         except Exception as error:
             st.error(
                 f"Note generation failed: {error}. "
